@@ -69,6 +69,7 @@ pub const Encoder = struct {
         }
 
         // Reserve space for document size (4 bytes of zeros)
+        try self.ensureCapacity(5); // 4 for size + 1 for null terminator at minimum
         @memset(self.buffer[0..4], 0);
         self.pos = 4;
 
@@ -78,6 +79,7 @@ pub const Encoder = struct {
         }
 
         // Append null terminator
+        try self.ensureCapacity(1);
         self.buffer[self.pos] = 0;
         self.pos += 1;
 
@@ -172,7 +174,7 @@ pub const Encoder = struct {
                     try self.encodeNull(name);
                 }
             },
-            .@"null" => try self.encodeNull(name),
+            .null => try self.encodeNull(name),
             .@"enum" => try self.encodeString(name, @tagName(value)),
             else => @compileError("Unsupported type: " ++ @typeName(T)),
         }
@@ -184,6 +186,7 @@ pub const Encoder = struct {
 
         if (type_info.bits <= 32) {
             // i32
+            try self.ensureCapacity(1);
             self.buffer[self.pos] = @intFromEnum(TypeTag.int32);
             self.pos += 1;
             try self.writeCString(name);
@@ -191,6 +194,7 @@ pub const Encoder = struct {
             try self.writeI32(val);
         } else {
             // i64
+            try self.ensureCapacity(1);
             self.buffer[self.pos] = @intFromEnum(TypeTag.int64);
             self.pos += 1;
             try self.writeCString(name);
@@ -200,6 +204,7 @@ pub const Encoder = struct {
     }
 
     fn encodeFloat(self: *Self, name: []const u8, value: anytype) errors.Error!void {
+        try self.ensureCapacity(1);
         self.buffer[self.pos] = @intFromEnum(TypeTag.double);
         self.pos += 1;
         try self.writeCString(name);
@@ -208,9 +213,11 @@ pub const Encoder = struct {
     }
 
     fn encodeBool(self: *Self, name: []const u8, value: bool) errors.Error!void {
+        try self.ensureCapacity(1);
         self.buffer[self.pos] = @intFromEnum(TypeTag.boolean);
         self.pos += 1;
         try self.writeCString(name);
+        try self.ensureCapacity(1);
         self.buffer[self.pos] = if (value) 1 else 0;
         self.pos += 1;
     }
@@ -221,6 +228,7 @@ pub const Encoder = struct {
             return error.InvalidUtf8;
         }
 
+        try self.ensureCapacity(1);
         self.buffer[self.pos] = @intFromEnum(TypeTag.string);
         self.pos += 1;
         try self.writeCString(name);
@@ -230,27 +238,32 @@ pub const Encoder = struct {
         try self.writeI32(len);
 
         // String data + null terminator
-        @memcpy(self.buffer[self.pos..self.pos+value.len], value);
+        try self.ensureCapacity(value.len + 1);
+        @memcpy(self.buffer[self.pos .. self.pos + value.len], value);
         self.pos += value.len;
         self.buffer[self.pos] = 0;
         self.pos += 1;
     }
 
     fn encodeNull(self: *Self, name: []const u8) errors.Error!void {
+        try self.ensureCapacity(1);
         self.buffer[self.pos] = @intFromEnum(TypeTag.null);
         self.pos += 1;
         try self.writeCString(name);
     }
 
     fn encodeObjectId(self: *Self, name: []const u8, oid: ObjectId) errors.Error!void {
+        try self.ensureCapacity(1);
         self.buffer[self.pos] = @intFromEnum(TypeTag.object_id);
         self.pos += 1;
         try self.writeCString(name);
-        @memcpy(self.buffer[self.pos..self.pos+12], &oid.bytes);
+        try self.ensureCapacity(12);
+        @memcpy(self.buffer[self.pos .. self.pos + 12], &oid.bytes);
         self.pos += 12;
     }
 
     fn encodeBinary(self: *Self, name: []const u8, binary: Binary) errors.Error!void {
+        try self.ensureCapacity(1);
         self.buffer[self.pos] = @intFromEnum(TypeTag.binary);
         self.pos += 1;
         try self.writeCString(name);
@@ -260,15 +273,18 @@ pub const Encoder = struct {
         try self.writeI32(len);
 
         // Subtype
+        try self.ensureCapacity(1);
         self.buffer[self.pos] = @intFromEnum(binary.subtype);
         self.pos += 1;
 
         // Data
-        @memcpy(self.buffer[self.pos..self.pos+binary.data.len], binary.data);
+        try self.ensureCapacity(binary.data.len);
+        @memcpy(self.buffer[self.pos .. self.pos + binary.data.len], binary.data);
         self.pos += binary.data.len;
     }
 
     fn encodeTimestamp(self: *Self, name: []const u8, ts: Timestamp) errors.Error!void {
+        try self.ensureCapacity(1);
         self.buffer[self.pos] = @intFromEnum(TypeTag.timestamp);
         self.pos += 1;
         try self.writeCString(name);
@@ -276,6 +292,7 @@ pub const Encoder = struct {
     }
 
     fn encodeRegex(self: *Self, name: []const u8, regex: Regex) errors.Error!void {
+        try self.ensureCapacity(1);
         self.buffer[self.pos] = @intFromEnum(TypeTag.regex);
         self.pos += 1;
         try self.writeCString(name);
@@ -284,21 +301,25 @@ pub const Encoder = struct {
     }
 
     fn encodeDecimal128(self: *Self, name: []const u8, decimal: Decimal128) errors.Error!void {
+        try self.ensureCapacity(1);
         self.buffer[self.pos] = @intFromEnum(TypeTag.decimal128);
         self.pos += 1;
         try self.writeCString(name);
-        @memcpy(self.buffer[self.pos..self.pos+16], &decimal.bytes);
+        try self.ensureCapacity(16);
+        @memcpy(self.buffer[self.pos .. self.pos + 16], &decimal.bytes);
         self.pos += 16;
     }
 
     fn encodeDocument(self: *Self, name: []const u8, doc: anytype) errors.Error!void {
+        try self.ensureCapacity(1);
         self.buffer[self.pos] = @intFromEnum(TypeTag.document);
         self.pos += 1;
         try self.writeCString(name);
 
         // Save position for size
         const size_pos = self.pos;
-        @memset(self.buffer[self.pos..self.pos+4], 0);
+        try self.ensureCapacity(4);
+        @memset(self.buffer[self.pos .. self.pos + 4], 0);
         self.pos += 4;
 
         // Encode struct fields
@@ -310,6 +331,7 @@ pub const Encoder = struct {
         }
 
         // Null terminator
+        try self.ensureCapacity(1);
         self.buffer[self.pos] = 0;
         self.pos += 1;
 
@@ -319,13 +341,15 @@ pub const Encoder = struct {
     }
 
     fn encodeArray(self: *Self, name: []const u8, array: anytype) errors.Error!void {
+        try self.ensureCapacity(1);
         self.buffer[self.pos] = @intFromEnum(TypeTag.array);
         self.pos += 1;
         try self.writeCString(name);
 
         // Save position for size
         const size_pos = self.pos;
-        @memset(self.buffer[self.pos..self.pos+4], 0);
+        try self.ensureCapacity(4);
+        @memset(self.buffer[self.pos .. self.pos + 4], 0);
         self.pos += 4;
 
         // Encode array elements with numeric keys
@@ -336,6 +360,7 @@ pub const Encoder = struct {
         }
 
         // Null terminator
+        try self.ensureCapacity(1);
         self.buffer[self.pos] = 0;
         self.pos += 1;
 
@@ -345,27 +370,50 @@ pub const Encoder = struct {
     }
 
     // Helper functions
+
+    /// Ensure buffer has at least `needed` bytes available from current position.
+    /// Grows the buffer by doubling (or more) if necessary.
+    fn ensureCapacity(self: *Self, needed: usize) errors.Error!void {
+        const required = self.pos + needed;
+        if (required <= self.buffer.len) return;
+
+        var new_cap = if (self.buffer.len == 0) @as(usize, 256) else self.buffer.len;
+        while (new_cap < required) {
+            new_cap *|= 2;
+        }
+
+        if (self.buffer.len == 0) {
+            self.buffer = self.allocator.alloc(u8, new_cap) catch return error.OutOfMemory;
+        } else {
+            self.buffer = self.allocator.realloc(self.buffer, new_cap) catch return error.OutOfMemory;
+        }
+    }
+
     fn writeCString(self: *Self, str: []const u8) errors.Error!void {
         if (std.mem.indexOfScalar(u8, str, 0) != null) {
             return error.InvalidFieldName;
         }
-        @memcpy(self.buffer[self.pos..self.pos+str.len], str);
+        try self.ensureCapacity(str.len + 1);
+        @memcpy(self.buffer[self.pos .. self.pos + str.len], str);
         self.pos += str.len;
         self.buffer[self.pos] = 0;
         self.pos += 1;
     }
 
     fn writeI32(self: *Self, value: i32) errors.Error!void {
+        try self.ensureCapacity(4);
         std.mem.writeInt(i32, self.buffer[self.pos..][0..4], value, .little);
         self.pos += 4;
     }
 
     fn writeI64(self: *Self, value: i64) errors.Error!void {
+        try self.ensureCapacity(8);
         std.mem.writeInt(i64, self.buffer[self.pos..][0..8], value, .little);
         self.pos += 8;
     }
 
     fn writeF64(self: *Self, value: f64) errors.Error!void {
+        try self.ensureCapacity(8);
         std.mem.writeInt(u64, self.buffer[self.pos..][0..8], @as(u64, @bitCast(value)), .little);
         self.pos += 8;
     }
