@@ -77,6 +77,174 @@ pub const BsonDocument = struct {
         }
     }
 
+    // ========================================================================
+    // Builder: create documents dynamically at runtime
+    // ========================================================================
+
+    /// Create an empty writable document (for building at runtime)
+    pub fn empty(allocator: std.mem.Allocator) Self {
+        // Minimum valid BSON document: 4-byte size (5) + null terminator
+        return .{
+            .allocator = allocator,
+            .data = &[_]u8{ 5, 0, 0, 0, 0 },
+            .owned = false,
+        };
+    }
+
+    /// Append a string field. Returns new document bytes (caller must deinit old).
+    pub fn put(self: *Self, name: []const u8, value: Value) !void {
+        var buf: std.ArrayList(u8) = .empty;
+        errdefer buf.deinit(self.allocator);
+
+        if (self.data.len >= 5) {
+            // Copy existing fields (skip 4-byte size header, drop trailing null)
+            const doc_size = std.mem.readInt(i32, self.data[0..4], .little);
+            const content_end = @as(usize, @intCast(doc_size)) - 1; // exclude null terminator
+            try buf.appendSlice(self.allocator, self.data[0..content_end]);
+        } else {
+            // New document: reserve 4 bytes for size
+            try buf.appendSlice(self.allocator, &[_]u8{ 0, 0, 0, 0 });
+        }
+
+        // Write type tag
+        const tag: u8 = switch (value) {
+            .double => @intFromEnum(TypeTag.double),
+            .string => @intFromEnum(TypeTag.string),
+            .document => @intFromEnum(TypeTag.document),
+            .array => @intFromEnum(TypeTag.array),
+            .binary => @intFromEnum(TypeTag.binary),
+            .object_id => @intFromEnum(TypeTag.object_id),
+            .boolean => @intFromEnum(TypeTag.boolean),
+            .datetime => @intFromEnum(TypeTag.datetime),
+            .null => @intFromEnum(TypeTag.null),
+            .regex => @intFromEnum(TypeTag.regex),
+            .int32 => @intFromEnum(TypeTag.int32),
+            .timestamp => @intFromEnum(TypeTag.timestamp),
+            .int64 => @intFromEnum(TypeTag.int64),
+            .decimal128 => @intFromEnum(TypeTag.decimal128),
+        };
+        try buf.append(self.allocator, tag);
+
+        // Write field name as cstring
+        try buf.appendSlice(self.allocator, name);
+        try buf.append(self.allocator, 0);
+
+        // Write value
+        switch (value) {
+            .double => |v| {
+                const bits: u64 = @bitCast(v);
+                try buf.appendSlice(self.allocator, std.mem.asBytes(&std.mem.nativeToLittle(u64, bits)));
+            },
+            .string => |v| {
+                const len: i32 = @intCast(v.len + 1);
+                try buf.appendSlice(self.allocator, std.mem.asBytes(&std.mem.nativeToLittle(i32, len)));
+                try buf.appendSlice(self.allocator, v);
+                try buf.append(self.allocator, 0);
+            },
+            .document => |v| {
+                try buf.appendSlice(self.allocator, v.data);
+            },
+            .array => |v| {
+                try buf.appendSlice(self.allocator, v.data);
+            },
+            .int32 => |v| {
+                try buf.appendSlice(self.allocator, std.mem.asBytes(&std.mem.nativeToLittle(i32, v)));
+            },
+            .int64 => |v| {
+                try buf.appendSlice(self.allocator, std.mem.asBytes(&std.mem.nativeToLittle(i64, v)));
+            },
+            .boolean => |v| {
+                try buf.append(self.allocator, if (v) 1 else 0);
+            },
+            .null => {},
+            .datetime => |v| {
+                try buf.appendSlice(self.allocator, std.mem.asBytes(&std.mem.nativeToLittle(i64, v)));
+            },
+            .object_id => |v| {
+                try buf.appendSlice(self.allocator, &v.bytes);
+            },
+            .binary => |v| {
+                const len: i32 = @intCast(v.data.len);
+                try buf.appendSlice(self.allocator, std.mem.asBytes(&std.mem.nativeToLittle(i32, len)));
+                try buf.append(self.allocator, @intFromEnum(v.subtype));
+                try buf.appendSlice(self.allocator, v.data);
+            },
+            .regex => |v| {
+                try buf.appendSlice(self.allocator, v.pattern);
+                try buf.append(self.allocator, 0);
+                try buf.appendSlice(self.allocator, v.options);
+                try buf.append(self.allocator, 0);
+            },
+            .timestamp => |v| {
+                // Timestamp is increment (u32) + timestamp (u32) = 8 bytes
+                try buf.appendSlice(self.allocator, std.mem.asBytes(&std.mem.nativeToLittle(u32, v.increment)));
+                try buf.appendSlice(self.allocator, std.mem.asBytes(&std.mem.nativeToLittle(u32, v.timestamp)));
+            },
+            .decimal128 => |v| {
+                try buf.appendSlice(self.allocator, &v.bytes);
+            },
+        }
+
+        // Null terminator
+        try buf.append(self.allocator, 0);
+
+        // Write document size
+        const size: i32 = @intCast(buf.items.len);
+        @memcpy(buf.items[0..4], std.mem.asBytes(&std.mem.nativeToLittle(i32, size)));
+
+        // Replace self's data
+        if (self.owned) {
+            self.allocator.free(self.data);
+        }
+        self.data = try buf.toOwnedSlice(self.allocator);
+        self.owned = true;
+    }
+
+    /// Convenience: append a string field
+    pub fn putString(self: *Self, name: []const u8, value: []const u8) !void {
+        try self.put(name, .{ .string = value });
+    }
+
+    /// Convenience: append an i32 field
+    pub fn putInt32(self: *Self, name: []const u8, value: i32) !void {
+        try self.put(name, .{ .int32 = value });
+    }
+
+    /// Convenience: append an i64 field
+    pub fn putInt64(self: *Self, name: []const u8, value: i64) !void {
+        try self.put(name, .{ .int64 = value });
+    }
+
+    /// Convenience: append a double field
+    pub fn putDouble(self: *Self, name: []const u8, value: f64) !void {
+        try self.put(name, .{ .double = value });
+    }
+
+    /// Convenience: append a boolean field
+    pub fn putBool(self: *Self, name: []const u8, value: bool) !void {
+        try self.put(name, .{ .boolean = value });
+    }
+
+    /// Convenience: append a null field
+    pub fn putNull(self: *Self, name: []const u8) !void {
+        try self.put(name, .{ .null = {} });
+    }
+
+    /// Convenience: append a sub-document
+    pub fn putDocument(self: *Self, name: []const u8, doc: BsonDocument) !void {
+        try self.put(name, .{ .document = doc });
+    }
+
+    /// Convenience: append an array
+    pub fn putArray(self: *Self, name: []const u8, arr: BsonArray) !void {
+        try self.put(name, .{ .array = arr });
+    }
+
+    /// Get the raw BSON bytes (valid after put calls)
+    pub fn toBytes(self: *const Self) []const u8 {
+        return self.data;
+    }
+
     /// Get a field value by name
     pub fn getField(self: *const Self, field_name: []const u8) !?Value {
         var pos: usize = 4; // Skip document size
@@ -286,7 +454,7 @@ pub const BsonDocument = struct {
         const str_len = @as(usize, @intCast(len - 1));
         if (pos.* + str_len + 1 > self.data.len) return error.UnexpectedEof;
 
-        const str = self.data[pos.*..pos.* + str_len];
+        const str = self.data[pos.* .. pos.* + str_len];
         pos.* += str_len + 1; // Skip string + null terminator
 
         return try self.allocator.dupe(u8, str);
@@ -296,7 +464,7 @@ pub const BsonDocument = struct {
         if (pos.* + 12 > self.data.len) return error.UnexpectedEof;
 
         var bytes: [12]u8 = undefined;
-        @memcpy(&bytes, self.data[pos.*..pos.* + 12]);
+        @memcpy(&bytes, self.data[pos.* .. pos.* + 12]);
         pos.* += 12;
 
         return ObjectId.fromBytes(bytes);
@@ -313,7 +481,7 @@ pub const BsonDocument = struct {
         const data_len = @as(usize, @intCast(len));
         if (pos.* + data_len > self.data.len) return error.UnexpectedEof;
 
-        const data = try self.allocator.dupe(u8, self.data[pos.*..pos.* + data_len]);
+        const data = try self.allocator.dupe(u8, self.data[pos.* .. pos.* + data_len]);
         pos.* += data_len;
 
         return Binary{
@@ -336,7 +504,7 @@ pub const BsonDocument = struct {
         if (pos.* + 16 > self.data.len) return error.UnexpectedEof;
 
         var bytes: [16]u8 = undefined;
-        @memcpy(&bytes, self.data[pos.*..pos.* + 16]);
+        @memcpy(&bytes, self.data[pos.* .. pos.* + 16]);
         pos.* += 16;
 
         return Decimal128.fromBytes(bytes);
@@ -345,7 +513,7 @@ pub const BsonDocument = struct {
     fn readDocument(self: *const Self, pos: *usize) !BsonDocument {
         const doc_start = pos.*;
         const doc_size = self.readI32(pos);
-        const doc_data = self.data[doc_start..doc_start + @as(usize, @intCast(doc_size))];
+        const doc_data = self.data[doc_start .. doc_start + @as(usize, @intCast(doc_size))];
 
         pos.* = doc_start + @as(usize, @intCast(doc_size));
 
@@ -355,7 +523,7 @@ pub const BsonDocument = struct {
     fn readArray(self: *const Self, pos: *usize) !BsonArray {
         const array_start = pos.*;
         const array_size = self.readI32(pos);
-        const array_data = self.data[array_start..array_start + @as(usize, @intCast(array_size))];
+        const array_data = self.data[array_start .. array_start + @as(usize, @intCast(array_size))];
 
         pos.* = array_start + @as(usize, @intCast(array_size));
 
