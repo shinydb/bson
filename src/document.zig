@@ -268,6 +268,31 @@ pub const BsonDocument = struct {
         return null; // Field not found
     }
 
+    /// Get a field value by name, supporting dot notation for nested fields.
+    /// E.g., "address.city" traverses into the "address" subdocument and returns "city".
+    pub fn getNestedField(self: *const Self, field_path: []const u8) !?Value {
+        // Fast path: no dot → plain field lookup
+        if (std.mem.indexOfScalar(u8, field_path, '.') == null) {
+            return self.getField(field_path);
+        }
+
+        // Split on first dot, traverse recursively
+        if (std.mem.indexOfScalar(u8, field_path, '.')) |dot_pos| {
+            const parent_name = field_path[0..dot_pos];
+            const rest = field_path[dot_pos + 1 ..];
+
+            if (try self.getField(parent_name)) |parent_val| {
+                switch (parent_val) {
+                    .document => |subdoc| return subdoc.getNestedField(rest),
+                    else => return null, // Parent exists but isn't a document
+                }
+            }
+            return null; // Parent field not found
+        }
+
+        return null;
+    }
+
     /// Get a string field
     pub fn getString(self: *const Self, field_name: []const u8) !?[]const u8 {
         if (try self.getField(field_name)) |value| {
