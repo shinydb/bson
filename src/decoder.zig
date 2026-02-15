@@ -228,7 +228,7 @@ pub const Decoder = struct {
             .float => @intFromEnum(TypeTag.double),
             .bool => @intFromEnum(TypeTag.boolean),
             .pointer => |ptr_info| if (ptr_info.child == u8) @intFromEnum(TypeTag.string) else @intFromEnum(TypeTag.array),
-            .@"struct" => |_| {
+            .@"struct" => {
                 if (T == ObjectId) return @intFromEnum(TypeTag.object_id);
                 if (T == Binary) return @intFromEnum(TypeTag.binary);
                 if (T == Timestamp) return @intFromEnum(TypeTag.timestamp);
